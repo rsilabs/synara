@@ -1730,3 +1730,124 @@ it("projects the real nested Claude SDK rate-limit envelope", () => {
   });
   expectSchemaValidActivities(event);
 });
+
+describe("approval.requested target fields (literati)", () => {
+  const project = (input: Record<string, unknown> & { eventId: string }) => {
+    const event = runtimeEvent({
+      type: "request.opened",
+      turnId: TURN_ID,
+      requestId: "approval-1",
+      ...input,
+    });
+    expectSchemaValidActivities(event);
+    const [activity] = projectProviderRuntimeActivities(event);
+    return activity?.payload as Record<string, unknown>;
+  };
+
+  it("carries Claude's tool name, tool use id and redacted input", () => {
+    expect(
+      project({
+        eventId: "claude-read",
+        provider: "claudeAgent",
+        payload: {
+          requestType: "file_read_approval",
+          args: { toolName: "Read", input: { file_path: "/a/b.tex" }, toolUseId: "toolu_1" },
+        },
+      }),
+    ).toMatchObject({ toolName: "Read", toolCallId: "toolu_1", input: { file_path: "/a/b.tex" } });
+    expect(
+      project({
+        eventId: "claude-bash",
+        provider: "claudeAgent",
+        payload: {
+          requestType: "command_execution_approval",
+          args: {
+            toolName: "Bash",
+            input: { command: "ls", api_key: "sk-secret" },
+            toolUseId: "toolu_2",
+          },
+        },
+      }),
+    ).toMatchObject({
+      toolName: "Bash",
+      toolCallId: "toolu_2",
+      input: { command: "ls", api_key: "[redacted]" },
+    });
+    const big = project({
+      eventId: "claude-mcp",
+      provider: "claudeAgent",
+      payload: {
+        requestType: "dynamic_tool_call",
+        args: {
+          toolName: "mcp__literati_connector__edit",
+          input: { file_path: "main.tex", new_string: "x".repeat(50_000) },
+          toolUseId: "toolu_3",
+        },
+      },
+    });
+    expect(big).toMatchObject({ toolName: "mcp__literati_connector__edit", toolCallId: "toolu_3" });
+    expect(JSON.stringify(big.input).length).toBeLessThan(17_000);
+  });
+
+  it("classifies Codex command, file-change and MCP approvals", () => {
+    expect(
+      project({
+        eventId: "codex-command",
+        payload: {
+          requestType: "command_execution_approval",
+          args: { itemId: "call_1", command: "cat x", cwd: "/w" },
+        },
+      }),
+    ).toMatchObject({
+      toolName: "command_execution",
+      toolCallId: "call_1",
+      input: { command: "cat x", cwd: "/w" },
+    });
+    expect(
+      project({
+        eventId: "codex-file-change",
+        payload: {
+          requestType: "file_change_approval",
+          args: { itemId: "call_2", fileChangePaths: ["/w/a.tex"], cwd: "/w" },
+        },
+      }),
+    ).toMatchObject({
+      toolName: "file_change",
+      toolCallId: "call_2",
+      input: { paths: ["/w/a.tex"], cwd: "/w" },
+    });
+    expect(
+      project({
+        eventId: "codex-mcp",
+        itemId: RuntimeItemId.makeUnsafe("call_3"),
+        payload: {
+          requestType: "tool_approval",
+          args: {
+            serverName: "literati_connector",
+            message: 'Allow the literati_connector MCP server to run tool "edit"?',
+            _meta: { codex_approval_kind: "mcp_tool_call" },
+          },
+        },
+      }),
+    ).toMatchObject({ toolName: "mcp__literati_connector__edit", toolCallId: "call_3" });
+    expect(
+      project({
+        eventId: "codex-mcp-matched-item",
+        payload: {
+          requestType: "tool_approval",
+          args: {
+            serverName: "literati_connector",
+            message: 'Allow the literati_connector MCP server to run tool "read"?',
+            mcpToolCallId: "exec-9",
+            mcpToolArguments: { file_path: "main.tex" },
+            _meta: { codex_approval_kind: "mcp_tool_call" },
+          },
+        },
+      }),
+    ).toMatchObject({
+      toolName: "mcp__literati_connector__read",
+      toolCallId: "exec-9",
+      input: { file_path: "main.tex" },
+    });
+  });
+});

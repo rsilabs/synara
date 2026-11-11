@@ -2,6 +2,7 @@ import { providerProcessPriorityEnabled } from "./providerProcessPriority";
 import type { ChildProcess, ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 
 import {
   ApprovalRequestId,
@@ -223,6 +224,13 @@ type CodexGatewayThreadConfig = {
 };
 
 interface CodexSessionContext {
+  /** literati: fileChange item id -> absolute paths, for its approval request. */
+  fileChangePathsByItemId?: Map<string, string[]>;
+  /** literati: in-progress mcpToolCall items awaiting a possible approval, oldest first. */
+  pendingMcpToolCalls?: Map<
+    string,
+    { readonly server: string; readonly tool: string; readonly arguments: unknown }
+  >;
   authInvalidation?: string;
   readonly autoApproveSynaraTools?: boolean;
   readonly enableComputerControl?: boolean;
@@ -4394,6 +4402,8 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     notification: JsonRpcNotification,
   ): void {
     const rawRoute = this.readRouteFields(notification.params);
+    this.rememberFileChangePaths(context, notification);
+    this.rememberMcpToolCalls(context, notification);
     this.rememberCollabReceiverTurns(context, notification.params, rawRoute.turnId);
     const resolvedCollaborationRoute = this.resolveCollaborationRoute(context, notification.params);
     const {
@@ -4840,9 +4850,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       requestKind,
       // The composer offers "Always allow this session" unless told otherwise;
       // an MCP approval that did not advertise session persistence cannot honor it.
-      payload:
-        isMcpToolCallApproval && mcpSessionPersistenceAdvertised !== true
-          ? { ...asObject(request.params), sessionApprovalAvailable: false }
+      payload: isMcpToolCallApproval
+        ? {
+            ...asObject(request.params),
+            ...this.mcpToolCallApprovalTarget(context, request.params),
+            ...(mcpSessionPersistenceAdvertised !== true
+              ? { sessionApprovalAvailable: false }
+              : {}),
+          }
+        : request.method === "item/fileChange/requestApproval"
+          ? this.fileChangeApprovalPayload(context, request.params)
           : request.params,
     });
 
@@ -5185,6 +5202,104 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     }
 
     return undefined;
+  }
+
+  // literati: Codex's fileChange approval carries only the item id; the paths
+  // arrive on the item itself, which starts before its approval is requested.
+  private rememberFileChangePaths(
+    context: CodexSessionContext,
+    notification: JsonRpcNotification,
+  ): void {
+    if (notification.method !== "item/started" && notification.method !== "item/completed") {
+      return;
+    }
+    const item = this.readObject(notification.params, "item");
+    if (this.readString(item, "type") !== "fileChange") return;
+    const itemId = this.readString(item, "id");
+    if (!itemId) return;
+    const paths = context.fileChangePathsByItemId ?? new Map<string, string[]>();
+    context.fileChangePathsByItemId = paths;
+    if (notification.method === "item/completed") {
+      paths.delete(itemId);
+      return;
+    }
+    const cwd = context.session.cwd;
+    const changed = (this.readArray(item, "changes") ?? []).flatMap((change) => {
+      const changePath = this.readString(change, "path");
+      if (!changePath) return [];
+      return [path.isAbsolute(changePath) || !cwd ? changePath : path.resolve(cwd, changePath)];
+    });
+    paths.set(itemId, [...new Set(changed)]);
+    // Bounded: an item whose completion never arrives must not pin memory.
+    if (paths.size > 256) {
+      const oldest = paths.keys().next().value;
+      if (oldest !== undefined) paths.delete(oldest);
+    }
+  }
+
+  // literati: Codex's MCP tool approval (an elicitation) names the server and
+  // tool but not the call; the mcpToolCall item starts just before it.
+  private rememberMcpToolCalls(
+    context: CodexSessionContext,
+    notification: JsonRpcNotification,
+  ): void {
+    if (notification.method !== "item/started" && notification.method !== "item/completed") {
+      return;
+    }
+    const item = this.readObject(notification.params, "item");
+    if (this.readString(item, "type") !== "mcpToolCall") return;
+    const itemId = this.readString(item, "id");
+    if (!itemId) return;
+    const calls = context.pendingMcpToolCalls ?? new Map();
+    context.pendingMcpToolCalls = calls;
+    const server = this.readString(item, "server");
+    const tool = this.readString(item, "tool");
+    if (notification.method === "item/completed" || !server || !tool) {
+      calls.delete(itemId);
+      return;
+    }
+    calls.set(itemId, { server, tool, arguments: item?.arguments });
+    if (calls.size > 64) {
+      const oldest = calls.keys().next().value;
+      if (oldest !== undefined) calls.delete(oldest);
+    }
+  }
+
+  private mcpToolCallApprovalTarget(
+    context: CodexSessionContext,
+    params: unknown,
+  ): { mcpToolCallId?: string; mcpToolArguments?: unknown } {
+    const server = this.readString(params, "serverName");
+    const meta = this.readObject(params, "_meta");
+    const tool =
+      this.readString(meta, "tool_name") ??
+      /^Allow the \S+ MCP server to run tool "([^"]+)"\?$/.exec(
+        this.readString(params, "message") ?? "",
+      )?.[1];
+    if (!server || !tool) return {};
+    for (const [itemId, call] of context.pendingMcpToolCalls ?? []) {
+      if (call.server !== server || call.tool !== tool) continue;
+      // Matched once: a parallel call to the same tool takes the next item.
+      context.pendingMcpToolCalls?.delete(itemId);
+      return {
+        mcpToolCallId: itemId,
+        ...(call.arguments !== undefined ? { mcpToolArguments: call.arguments } : {}),
+      };
+    }
+    return {};
+  }
+
+  private fileChangeApprovalPayload(context: CodexSessionContext, params: unknown): unknown {
+    const record = this.readObject(params);
+    if (!record) return params;
+    const itemId = this.readString(record, "itemId");
+    const paths = itemId ? context.fileChangePathsByItemId?.get(itemId) : undefined;
+    const cwd = this.readString(record, "cwd") ?? context.session.cwd;
+    return {
+      ...record,
+      ...(paths ? { fileChangePaths: paths } : {}),
+      ...(cwd ? { cwd } : {}),
+    };
   }
 
   private isMcpToolCallApprovalRequest(params: unknown): boolean {

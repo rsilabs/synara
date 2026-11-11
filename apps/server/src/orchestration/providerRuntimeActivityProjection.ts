@@ -667,6 +667,114 @@ function requestedMcpToolCallPresentation(
   };
 }
 
+// literati: what an approval is for, precisely enough for a client to decide
+// it: the provider tool name, the id the tool's own activities carry
+// (`data.toolCallId` / `data.item.id`), and its redacted, size-bounded input.
+interface ApprovalTarget {
+  toolName?: string;
+  toolCallId?: string;
+  input?: unknown;
+}
+
+function redactedBoundedApprovalInput(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  const serialized = safeStringifyRedacted(value);
+  return serialized === undefined ? undefined : boundActivityData(JSON.parse(serialized));
+}
+
+function safeStringifyRedacted(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value, redactSensitiveJsonFields);
+  } catch {
+    return undefined;
+  }
+}
+
+const CODEX_MCP_APPROVAL_MESSAGE_PATTERN = /^Allow the (\S+) MCP server to run tool "([^"]+)"\?$/;
+
+function codexApprovalTarget(
+  event: Extract<ProviderRuntimeEvent, { type: "request.opened" }>,
+  args: Record<string, unknown>,
+): ApprovalTarget {
+  const meta = asObject(args._meta);
+  const toolCallId =
+    asString(args.itemId) ??
+    asString(args.mcpToolCallId) ??
+    asString(meta?.call_id) ??
+    asString(meta?.tool_call_id) ??
+    (event.itemId !== undefined ? String(event.itemId) : undefined);
+  const cwd = asString(args.cwd);
+  const withId = (target: ApprovalTarget): ApprovalTarget => ({
+    ...target,
+    ...(toolCallId ? { toolCallId } : {}),
+  });
+  switch (event.payload.requestType) {
+    case "command_execution_approval":
+    case "exec_command_approval":
+      return withId({
+        toolName: "command_execution",
+        input: redactedBoundedApprovalInput({
+          ...(args.command !== undefined ? { command: args.command } : {}),
+          ...(cwd ? { cwd } : {}),
+        }),
+      });
+    case "file_change_approval":
+    case "apply_patch_approval": {
+      const paths = Array.isArray(args.fileChangePaths)
+        ? args.fileChangePaths.filter((entry): entry is string => typeof entry === "string")
+        : [];
+      return withId({
+        toolName: "file_change",
+        input: redactedBoundedApprovalInput({ paths, ...(cwd ? { cwd } : {}) }),
+      });
+    }
+    case "file_read_approval":
+      return withId({
+        toolName: "file_read",
+        input: redactedBoundedApprovalInput({
+          ...(asString(args.path) ? { path: args.path } : {}),
+          ...(cwd ? { cwd } : {}),
+        }),
+      });
+    case "permissions_approval":
+      return withId({
+        toolName: "permissions",
+        input: redactedBoundedApprovalInput(asObject(args.permissions) ?? {}),
+      });
+    case "tool_approval": {
+      const parsed = CODEX_MCP_APPROVAL_MESSAGE_PATTERN.exec(asString(args.message) ?? "");
+      const server = asString(args.serverName) ?? parsed?.[1];
+      const tool = asString(meta?.tool_name) ?? parsed?.[2];
+      const params = asObject(meta?.tool_params) ?? asObject(args.mcpToolArguments);
+      return withId({
+        ...(server && tool ? { toolName: `mcp__${server}__${tool}` } : {}),
+        ...(params ? { input: redactedBoundedApprovalInput(params) } : {}),
+      });
+    }
+    default:
+      return withId({});
+  }
+}
+
+function requestedApprovalTarget(
+  event: Extract<ProviderRuntimeEvent, { type: "request.opened" }>,
+): ApprovalTarget {
+  const args = asObject(event.payload.args);
+  if (!args) return {};
+  if (event.provider === "codex") return codexApprovalTarget(event, args);
+  // Claude's canUseTool request: { toolName, input, toolUseId }.
+  const toolName = asString(args.toolName);
+  if (!toolName) return {};
+  const toolCallId =
+    asString(args.toolUseId) ?? (event.itemId !== undefined ? String(event.itemId) : undefined);
+  const input = asObject(args.input);
+  return {
+    toolName,
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(input ? { input: redactedBoundedApprovalInput(input) } : {}),
+  };
+}
+
 function boundActivityDataOrUndefined(value: unknown): unknown {
   return value === undefined ? undefined : boundActivityData(value);
 }
@@ -770,6 +878,7 @@ export function projectProviderRuntimeActivities(
         event.type === "request.opened" ? sessionApprovalAvailable(event) : undefined;
       const toolCallPresentation =
         event.type === "request.opened" ? requestedMcpToolCallPresentation(event) : {};
+      const approvalTarget = event.type === "request.opened" ? requestedApprovalTarget(event) : {};
       const requestId = nonEmptyTrimmed(event.requestId);
       return [
         {
@@ -805,6 +914,7 @@ export function projectProviderRuntimeActivities(
               : {}),
             ...(permissionProfile ? { permissionProfile } : {}),
             ...toolCallPresentation,
+            ...approvalTarget,
             ...(canApproveForSession !== undefined
               ? { sessionApprovalAvailable: canApproveForSession }
               : {}),
