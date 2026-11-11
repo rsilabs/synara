@@ -122,6 +122,12 @@ import {
 } from "effect";
 
 import { buildClaudeMcpServers } from "../../agentGateway/mcpInjection.ts";
+import {
+  type ClaudeMcpConfigFile,
+  claudeMcpConfigDir,
+  sweepClaudeMcpConfigFiles,
+  writeClaudeMcpConfigFile,
+} from "../claudeMcpConfigFile.ts";
 import { renderSynaraHarnessPolicy } from "../../agentGateway/harnessPolicy.ts";
 import {
   isSynaraGatewayToolName,
@@ -420,6 +426,8 @@ interface ClaudeSessionContext {
   // result of a new process. Until a baseline exists, a result is not one turn.
   resultUsageMayIncludeResumedTotals?: boolean;
   readonly gatewaySessionLease?: AgentGatewaySessionLease;
+  /** literati: removed as soon as the CLI reports init (it has read the file). */
+  readonly mcpConfigFile?: ClaudeMcpConfigFile;
   session: ProviderSession;
   readonly lifecycleGeneration?: string;
   readonly cacheProcessId: string;
@@ -2423,6 +2431,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
     const adapterScope = yield* Effect.scope;
     const fileSystem = yield* FileSystem.FileSystem;
     const serverConfig = yield* ServerConfig;
+    // literati: drop MCP config files a crashed run left behind, and again
+    // when the adapter shuts down (a session's own removal is fire-and-forget
+    // and can lose the race with process exit).
+    yield* Effect.promise(() =>
+      sweepClaudeMcpConfigFiles(claudeMcpConfigDir(serverConfig.baseDir)),
+    );
+    yield* Effect.addFinalizer(() =>
+      Effect.promise(() => sweepClaudeMcpConfigFiles(claudeMcpConfigDir(serverConfig.baseDir))),
+    );
     // Optional so adapter tests can run without the gateway layer; when
     // present, every session gets the synara_* MCP tools.
     const agentGatewayCredentials = Option.getOrUndefined(
@@ -5712,6 +5729,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
         switch (message.subtype) {
           case "init":
+            // literati: the CLI has loaded its MCP config; the bearer-bearing
+            // file need not outlive startup (shutdown may not reach release).
+            context.mcpConfigFile?.remove();
             if (Array.isArray(message.tools)) {
               context.initToolNames = new Set(message.tools);
             }
@@ -7433,12 +7453,45 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         }
         const processOwner: ClaudeProcessOwner = {};
 
-        const gatewaySessionLease = acquireAgentGatewaySessionLease(
+        const acquiredGatewayLease = acquireAgentGatewaySessionLease(
           agentGatewayCredentials,
           threadId,
           PROVIDER,
           input,
         );
+        // literati: the MCP config (with the gateway bearer) goes to the CLI as
+        // a private file path, never as JSON on argv. The file is removed with
+        // the lease, which every stop and failed-start path releases.
+        const claudeMcpServers = acquiredGatewayLease
+          ? buildClaudeMcpServers(acquiredGatewayLease.connection)
+          : undefined;
+        const mcpConfigFile =
+          acquiredGatewayLease && claudeMcpServers && Object.keys(claudeMcpServers).length > 0
+            ? yield* Effect.tryPromise({
+                try: () =>
+                  writeClaudeMcpConfigFile(
+                    claudeMcpConfigDir(serverConfig.baseDir),
+                    claudeMcpServers,
+                  ),
+                catch: (cause) =>
+                  new ProviderAdapterProcessError({
+                    provider: PROVIDER,
+                    threadId,
+                    detail: toMessage(cause, "Failed to prepare Claude MCP configuration."),
+                    cause,
+                  }),
+              }).pipe(Effect.tapError(() => Effect.sync(acquiredGatewayLease.release)))
+            : undefined;
+        const gatewaySessionLease =
+          acquiredGatewayLease && mcpConfigFile
+            ? {
+                ...acquiredGatewayLease,
+                release: () => {
+                  acquiredGatewayLease.release();
+                  mcpConfigFile.remove();
+                },
+              }
+            : acquiredGatewayLease;
         const queryOptions: ClaudeQueryOptions = {
           ...(input.cwd ? { cwd: input.cwd } : {}),
           // Model identity and the spawn-fixed compaction override are separate settings.
@@ -7495,11 +7548,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 ],
               }
             : {}),
-          ...(agentGatewayCredentials
-            ? {
-                mcpServers: buildClaudeMcpServers(gatewaySessionLease!.connection),
-              }
-            : {}),
+          ...(mcpConfigFile ? { extraArgs: { "mcp-config": mcpConfigFile.path } } : {}),
         };
 
         const queryRuntime = yield* Effect.tryPromise({
@@ -7625,6 +7674,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             ...(initialCacheObservation ? { cacheObservation: initialCacheObservation } : {}),
             ...(existingResumeSessionId ? { resultUsageMayIncludeResumedTotals: true } : {}),
             ...(gatewaySessionLease ? { gatewaySessionLease } : {}),
+            ...(mcpConfigFile ? { mcpConfigFile } : {}),
             session,
             artifactsEnabled: providerOptions?.enableArtifacts === true,
             ...(input.lifecycleGeneration !== undefined

@@ -1,5 +1,6 @@
 import { MixedScheduler, MaxOpsBeforeYield } from "effect/Scheduler";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -990,13 +991,44 @@ describe("ClaudeAdapterLive", () => {
 
       const options = harness.createInputs[0]?.options;
       assert.equal(options?.model, "claude-opus-4-8");
-      assert.deepEqual(options?.mcpServers, {
-        synara: {
-          type: "http",
-          url: "http://127.0.0.1:48123/mcp",
-          headers: { Authorization: "Bearer gateway-token-1" },
+      // literati: the MCP config (with the bearer) is a private file, not argv JSON.
+      assert.equal(options?.mcpServers, undefined);
+      const mcpConfigPath = options?.extraArgs?.["mcp-config"];
+      assert.isString(mcpConfigPath);
+      const mcpConfig = yield* Effect.promise(() => readFile(mcpConfigPath!, "utf8"));
+      assert.deepEqual(JSON.parse(mcpConfig), {
+        mcpServers: {
+          synara: {
+            type: "http",
+            url: "http://127.0.0.1:48123/mcp",
+            headers: { Authorization: "Bearer gateway-token-1" },
+          },
         },
       });
+      if (process.platform !== "win32") {
+        const fileMode = (yield* Effect.promise(() => stat(mcpConfigPath!))).mode & 0o777;
+        const dirMode =
+          (yield* Effect.promise(() => stat(path.dirname(mcpConfigPath!)))).mode & 0o777;
+        assert.equal(fileMode, 0o600);
+        assert.equal(dirMode, 0o700);
+      }
+      assert.notInclude(JSON.stringify(options?.extraArgs), "Bearer");
+      // Once the CLI reports init it has read the file, which is then removed.
+      harness.queries[0]?.emit({
+        type: "system",
+        subtype: "init",
+        session_id: "sdk-session-init",
+        uuid: "init-1",
+        tools: [],
+      } as unknown as SDKMessage);
+      yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 50)));
+      const stillThere = yield* Effect.promise(() =>
+        stat(mcpConfigPath!).then(
+          () => true,
+          () => false,
+        ),
+      );
+      assert.equal(stillThere, false);
 
       const systemPrompt = options?.systemPrompt;
       if (
