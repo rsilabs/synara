@@ -2,11 +2,11 @@
 // Purpose: Tracks live terminal modes so a fresh renderer can reattach with matching input state.
 // Layer: Terminal infrastructure
 
-import { createRequire } from "node:module";
+// literati: a static import (not createRequire) so the standalone bundle can
+// inline the package instead of resolving it from node_modules at runtime.
+import xtermHeadless from "@xterm/headless";
 
-const require = createRequire(import.meta.url);
-const { Terminal: HeadlessTerminal } =
-  require("@xterm/headless") as typeof import("@xterm/headless");
+const { Terminal: HeadlessTerminal } = xtermHeadless;
 
 export interface TerminalModeReplayTracker {
   feed(data: string): void;

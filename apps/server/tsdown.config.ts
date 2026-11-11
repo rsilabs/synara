@@ -12,6 +12,11 @@ import { defineConfig } from "tsdown";
 
 const sourcemapEnv = process.env.SYNARA_SERVER_SOURCEMAP?.trim().toLowerCase();
 const buildSourcemap = sourcemapEnv === "1" || sourcemapEnv === "true";
+// literati: SYNARA_STANDALONE=1 inlines every npm dependency (tree-shaken,
+// minified) so the shipped runtime needs no node_modules beyond the native
+// modules listed here.
+const standalone = process.env.SYNARA_STANDALONE === "1";
+const STANDALONE_EXTERNAL = new Set(["node-pty"]);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const migrationRuntimeSource = fs.readFileSync(
   path.join(repoRoot, "apps/server/src/persistence/Migrations.ts"),
@@ -39,7 +44,10 @@ export default defineConfig({
     __SYNARA_MIGRATION_RUNTIME_SOURCE_DIGEST__: JSON.stringify(migrationRuntimeSourceDigest),
   },
   clean: true,
-  noExternal: (id) => id.startsWith("@synara/"),
+  noExternal: standalone
+    ? (id) => !STANDALONE_EXTERNAL.has(id) && !id.startsWith("bun:")
+    : (id) => id.startsWith("@synara/"),
+  ...(standalone ? { minify: true } : {}),
   inlineOnly: false,
   banner: {
     js: "#!/usr/bin/env node\n",
