@@ -122,6 +122,7 @@ import {
 } from "effect";
 
 import { buildClaudeMcpServers } from "../../agentGateway/mcpInjection.ts";
+import { agentGatewayToolsDisabled, strictMcpEnabled } from "../../literatiFlags.ts";
 import {
   type ClaudeMcpConfigFile,
   claudeMcpConfigDir,
@@ -7192,6 +7193,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 context.turnState?.turnId ??
                 (callbackOptions.agentID !== undefined ? context.lastTurnId : undefined);
               if (
+                !agentGatewayToolsDisabled() &&
                 shouldAllowSynaraComputerProviderTool({
                   computerControlEnabled:
                     input.enableComputerControl === true &&
@@ -7213,6 +7215,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               // scopes and authorizes them server-side. File edits, shell, and
               // every non-Synara tool keep the ordinary permission path.
               if (
+                !agentGatewayToolsDisabled() &&
                 input.autoApproveSynaraTools === true &&
                 context.gatewaySessionLease !== undefined &&
                 isSynaraGatewayToolName(toolName)
@@ -7434,6 +7437,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(effectiveEffort && effectiveEffort !== "max" ? { effortLevel: effectiveEffort } : {}),
           ...(fastMode ? { fastMode: true } : {}),
           ...(ultracode ? { ultracode: true } : {}),
+          ...(strictMcpEnabled() ? { disableClaudeAiConnectors: true } : {}),
         };
         const claudeSubagents = buildClaudeSdkSubagents();
         const { claudeSdkEnv, snapshotSupported } =
@@ -7502,7 +7506,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
             type: "preset",
             preset: "claude_code",
             append: buildEmbeddedClaudeSystemPromptAppend(
-              agentGatewayCredentials !== undefined,
+              agentGatewayCredentials !== undefined && !agentGatewayToolsDisabled(),
               input.enableComputerControl === true,
             ),
             // Strip per-user dynamic sections (working directory, auto-memory
@@ -7549,6 +7553,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               }
             : {}),
           ...(mcpConfigFile ? { extraArgs: { "mcp-config": mcpConfigFile.path } } : {}),
+          // literati: only Synara-injected servers; the user's ~/.claude.json,
+          // .mcp.json, plugin servers and claude.ai connectors stay out.
+          ...(strictMcpEnabled() ? { strictMcpConfig: true } : {}),
         };
 
         const queryRuntime = yield* Effect.tryPromise({

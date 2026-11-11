@@ -533,6 +533,7 @@ function makeMultiQueryHarness(config?: {
 
 function makeGatewayCredentialsHarness(options?: {
   readonly cancelSessionTurnRequests?: (token: string, turnId: string) => Promise<void>;
+  readonly connectors?: ReadonlyArray<{ readonly name: string; readonly url: string }>;
 }) {
   let sequence = 0;
   const revokedTokens: string[] = [];
@@ -566,6 +567,7 @@ function makeGatewayCredentialsHarness(options?: {
       return {
         url: "http://127.0.0.1:48123/mcp",
         bearerToken: `gateway-token-${++sequence}`,
+        ...(options?.connectors ? { connectors: options.connectors } : {}),
       };
     },
     stdioProxy: { command: "node", args: ["/state/proxy.mjs"] },
@@ -1046,6 +1048,72 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "literati flags: no Synara gateway server, connectors kept, strict MCP, file removed on stop",
+    () => {
+      const gateway = makeGatewayCredentialsHarness({
+        connectors: [
+          { name: "literati_connector", url: "http://127.0.0.1:48123/mcp/connectors/c1" },
+        ],
+      });
+      const harness = makeMultiQueryHarness({ gatewayCredentials: gateway.credentials });
+      return Effect.gen(function* () {
+        yield* Effect.acquireRelease(
+          Effect.sync(() => {
+            process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
+            process.env.SYNARA_STRICT_MCP = "1";
+          }),
+          () =>
+            Effect.sync(() => {
+              delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
+              delete process.env.SYNARA_STRICT_MCP;
+            }),
+        );
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: "claudeAgent",
+          runtimeMode: "approval-required",
+        });
+        const options = harness.createInputs[0]?.options;
+        assert.equal(options?.strictMcpConfig, true);
+        const settings = options?.settings;
+        assert.equal(
+          typeof settings === "object" ? settings.disableClaudeAiConnectors : undefined,
+          true,
+        );
+        const mcpConfigPath = options?.extraArgs?.["mcp-config"];
+        assert.isString(mcpConfigPath);
+        const mcpConfig = JSON.parse(
+          yield* Effect.promise(() => readFile(mcpConfigPath!, "utf8")),
+        ) as { mcpServers: Record<string, unknown> };
+        assert.deepEqual(Object.keys(mcpConfig.mcpServers), ["literati_connector"]);
+        const systemPrompt = options?.systemPrompt;
+        const append =
+          typeof systemPrompt === "object" &&
+          !Array.isArray(systemPrompt) &&
+          "append" in systemPrompt
+            ? (systemPrompt.append ?? "")
+            : "";
+        assert.notInclude(append, "browser_*");
+        assert.include(append, "Synara MCP control is unavailable");
+
+        yield* adapter.stopSession(THREAD_ID);
+        yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));
+        const exists = yield* Effect.promise(() =>
+          stat(mcpConfigPath!).then(
+            () => true,
+            () => false,
+          ),
+        );
+        assert.equal(exists, false);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("derives auto permission mode without bypassing permission safeguards", () => {
     const harness = makeHarness();

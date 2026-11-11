@@ -4,6 +4,7 @@ import { INLINE_VISUALS_BETA_FEATURE } from "@synara/shared/betaFeatures";
 import { isServerBetaFeatureEnabled } from "../betaFeatureGate.ts";
 
 import { computerToolInstructions } from "./computerGuidance.ts";
+import { agentGatewayToolsDisabled } from "../literatiFlags.ts";
 
 import { AUTOMATION_AUTHORING_GUIDANCE } from "./automationAuthoringGuidance.ts";
 
@@ -111,6 +112,7 @@ export function providerHasSynaraGatewayControl(input: {
   readonly scopedGatewayConnectionAvailable: boolean;
 }): boolean {
   return (
+    !agentGatewayToolsDisabled() &&
     input.scopedGatewayConnectionAvailable &&
     PROVIDERS_WITH_THREAD_SCOPED_SYNARA_MCP.has(input.provider)
   );

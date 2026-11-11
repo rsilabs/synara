@@ -422,6 +422,59 @@ it.each(["global", "project"] as const)(
   },
 );
 
+it("literati: strict MCP disables the user's servers and gateway-off drops synara", async () => {
+  process.env.SYNARA_STRICT_MCP = "1";
+  process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
+  const fake = createSyntheticCodexAppServer({
+    mcpServers: { node_repl: { command: "node_repl" }, literati: { url: "https://x/mcp" } },
+    projectMcpServers: { project_server: { command: "p" } },
+  });
+  const endpoint = "http://127.0.0.1:48123/mcp";
+  const { manager } = createSyntheticCodexManager(fake, undefined, {
+    endpointUrl: () => endpoint,
+    acquireSessionLease: (threadId, input) =>
+      acquireAgentGatewaySessionLease(
+        {
+          connectionForThread: () => ({
+            url: endpoint,
+            bearerToken: "lease",
+            connectors: [{ name: "literati_connector", url: `${endpoint}/connectors/lit` }],
+          }),
+          revokeSessionToken: () => {},
+        },
+        threadId,
+        "codex",
+        input ?? AGENT_GATEWAY_NO_CAPABILITIES,
+      )!,
+  });
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "synara-codex-strict-mcp-"));
+  try {
+    await manager.startSession({
+      threadId: asThreadId("strict-mcp"),
+      provider: "codex",
+      cwd,
+      runtimeMode: "approval-required",
+      agentGatewayCapabilityInput: AGENT_GATEWAY_NO_CAPABILITIES,
+    });
+    const start = fake.requests.find((request) => request.method === "thread/start");
+    const config = start?.params?.config as { mcp_servers: Record<string, unknown> };
+    expect(config.mcp_servers).toEqual({
+      literati_connector: {
+        url: `${endpoint}/connectors/lit`,
+        http_headers: { Authorization: "Bearer lease" },
+      },
+      node_repl: { enabled: false },
+      literati: { enabled: false },
+      project_server: { enabled: false },
+    });
+  } finally {
+    delete process.env.SYNARA_STRICT_MCP;
+    delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
+    await manager.stopAll();
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 it.each([
   "supported",
   "unsupported",

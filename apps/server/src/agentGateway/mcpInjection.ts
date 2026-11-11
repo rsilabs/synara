@@ -18,6 +18,7 @@ import type * as Acp from "@agentclientprotocol/sdk";
 import { SYNARA_MCP_SERVER_NAME } from "@synara/shared/mcpConnectors";
 export { SYNARA_MCP_SERVER_NAME } from "@synara/shared/mcpConnectors";
 
+import { agentGatewayToolsDisabled } from "../literatiFlags.ts";
 import type {
   AgentGatewayMcpConnection,
   AgentGatewayStdioProxySpawn,
@@ -48,12 +49,17 @@ export function buildCodexMcpConfigToml(
   credentialTransport: "environment" | "thread" = "environment",
 ): string {
   return [
-    `[mcp_servers.${SYNARA_MCP_SERVER_NAME}]`,
-    `url = ${JSON.stringify(endpointUrl)}`,
-    ...(credentialTransport === "environment"
-      ? [`bearer_token_env_var = ${JSON.stringify(SYNARA_AGENT_GATEWAY_TOKEN_ENV)}`]
-      : []),
-    "",
+    // literati: without gateway tools the shared config carries no Synara server.
+    ...(agentGatewayToolsDisabled()
+      ? []
+      : [
+          `[mcp_servers.${SYNARA_MCP_SERVER_NAME}]`,
+          `url = ${JSON.stringify(endpointUrl)}`,
+          ...(credentialTransport === "environment"
+            ? [`bearer_token_env_var = ${JSON.stringify(SYNARA_AGENT_GATEWAY_TOKEN_ENV)}`]
+            : []),
+          "",
+        ]),
     "[shell_environment_policy]",
     `exclude = [${JSON.stringify(SYNARA_AGENT_GATEWAY_TOKEN_ENV)}]`,
   ].join("\n");
@@ -65,9 +71,9 @@ export function buildCodexMcpThreadConfig(connection: AgentGatewayMcpConnection)
   const mcpServers: Record<
     string,
     { readonly url: string; readonly http_headers: Record<string, string> }
-  > = {
-    [SYNARA_MCP_SERVER_NAME]: { url: connection.url, http_headers: headers },
-  };
+  > = agentGatewayToolsDisabled()
+    ? {}
+    : { [SYNARA_MCP_SERVER_NAME]: { url: connection.url, http_headers: headers } };
   // Connectors only exist in the per-thread config: Codex starts servers it
   // first sees here, and the shared config.toml must stay secret-free.
   for (const connector of connection.connectors ?? []) {
@@ -231,9 +237,11 @@ export function buildClaudeMcpServers(
   connection: AgentGatewayMcpConnection,
 ): Record<string, ClaudeMcpHttpServerConfig> {
   const headers = { Authorization: authorizationHeader(connection) };
-  const servers: Record<string, ClaudeMcpHttpServerConfig> = {
-    [SYNARA_MCP_SERVER_NAME]: { type: "http", url: connection.url, headers },
-  };
+  // literati: connectors are proxied through the gateway with the same bearer,
+  // so they stay when the gateway's own tools are disabled.
+  const servers: Record<string, ClaudeMcpHttpServerConfig> = agentGatewayToolsDisabled()
+    ? {}
+    : { [SYNARA_MCP_SERVER_NAME]: { type: "http", url: connection.url, headers } };
   for (const connector of connection.connectors ?? []) {
     servers[connector.name] = { type: "http", url: connector.url, headers };
   }

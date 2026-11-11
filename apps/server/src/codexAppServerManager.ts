@@ -111,6 +111,7 @@ import {
   normalizeCodexUserVisibleErrorMessage,
 } from "@synara/shared/codexStderr";
 import { transcribeVoiceWithChatGptSession } from "./voiceTranscription.ts";
+import { agentGatewayToolsDisabled, strictMcpEnabled } from "./literatiFlags.ts";
 import {
   CODEX_APP_SERVER_MAX_DISCOVERY_FRAME_BYTES,
   CodexAppServerTransportError,
@@ -213,6 +214,13 @@ type CodexSessionApprovalOverride = {
 };
 
 export class CodexSessionAuthInvalidatedError extends Error {}
+
+type CodexThreadMcpServerConfig =
+  | ReturnType<typeof buildCodexMcpThreadConfig>["mcp_servers"][string]
+  | { readonly enabled: false };
+type CodexGatewayThreadConfig = {
+  readonly mcp_servers: Record<string, CodexThreadMcpServerConfig>;
+};
 
 interface CodexSessionContext {
   authInvalidation?: string;
@@ -705,7 +713,7 @@ function mapCodexRuntimeMode(runtimeMode: RuntimeMode): {
 }
 
 interface CodexThreadSessionOverrides {
-  readonly config?: ReturnType<typeof buildCodexMcpThreadConfig>;
+  readonly config?: CodexGatewayThreadConfig;
   readonly model: string | null;
   readonly serviceTier?: string;
   readonly cwd: string;
@@ -920,17 +928,28 @@ export function buildCodexCollaborationMode(input: {
   }
   const model = normalizeCodexModelSlug(input.model) ?? "gpt-5.3-codex";
   const nativeMode = input.interactionMode === "plan" ? "plan" : "default";
-  const instructions =
+  const modeInstructions =
     nativeMode === "plan"
       ? CODEX_PLAN_MODE_DEVELOPER_INSTRUCTIONS
       : CODEX_DEFAULT_MODE_DEVELOPER_INSTRUCTIONS;
+  // literati: without gateway tools, drop the browser routing and tell the
+  // truthful no-gateway policy instead of pointing at missing synara tools.
+  const gatewayToolsDisabled = agentGatewayToolsDisabled();
+  const instructions = gatewayToolsDisabled
+    ? modeInstructions
+        .replace(CODEX_BROWSER_TOOL_ROUTING_INSTRUCTIONS, "")
+        .replace(
+          SYNARA_GATEWAY_HARNESS_POLICY,
+          renderSynaraHarnessPolicy({ gatewayControlAvailable: false }),
+        )
+    : modeInstructions;
   return {
     mode: nativeMode,
     settings: {
       model,
       reasoning_effort: input.effort ?? "medium",
       developer_instructions:
-        input.enableComputerControl === true
+        input.enableComputerControl === true && !gatewayToolsDisabled
           ? instructions.replace(
               SYNARA_GATEWAY_HARNESS_POLICY,
               renderSynaraHarnessPolicy({
@@ -1240,8 +1259,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   private async gatewayThreadConfig(
     context: CodexSessionContext,
     connection: AgentGatewaySessionLease["connection"],
-  ): Promise<ReturnType<typeof buildCodexMcpThreadConfig>> {
-    if (!connection.connectors?.length) return buildCodexMcpThreadConfig(connection);
+  ): Promise<CodexGatewayThreadConfig> {
+    const strict = strictMcpEnabled();
+    if (!connection.connectors?.length && !strict) return buildCodexMcpThreadConfig(connection);
     let configured: Record<string, unknown>;
     try {
       const response = this.readObject(
@@ -1254,20 +1274,35 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       if (!config) throw new Error("Missing Codex configuration.");
       configured = this.readObject(config, "mcp_servers") ?? {};
     } catch {
+      // literati: strict MCP cannot disable servers it cannot see; fail closed.
+      if (strict) {
+        throw new Error(
+          "Codex MCP configuration could not be read; refusing to start the session.",
+        );
+      }
       // Do not guess a free namespace or log raw config errors containing secrets.
       log.warn(
         "Codex connector configuration could not be checked; connectors omitted for this session",
       );
       return buildCodexMcpThreadConfig({ ...connection, connectors: [] });
     }
-    const connectors = connection.connectors.filter((connector) => {
+    const connectors = (connection.connectors ?? []).filter((connector) => {
       if (!Object.hasOwn(configured, connector.name)) return true;
       log.warn("Codex connector name is already configured; preserving the user's MCP server", {
         server: connector.name,
       });
       return false;
     });
-    return buildCodexMcpThreadConfig({ ...connection, connectors });
+    const config = buildCodexMcpThreadConfig({ ...connection, connectors });
+    if (!strict) return config;
+    // literati: strict MCP. Every server from the user's config layers is
+    // disabled for this thread (Codex deep-merges `enabled = false` into it);
+    // only Synara-injected entries remain.
+    const mcpServers: Record<string, CodexThreadMcpServerConfig> = { ...config.mcp_servers };
+    for (const name of Object.keys(configured)) {
+      if (!Object.hasOwn(mcpServers, name)) mcpServers[name] = { enabled: false };
+    }
+    return { mcp_servers: mcpServers };
   }
   constructor(
     services?: ServiceMap.ServiceMap<never>,
@@ -4679,6 +4714,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       ? this.readSynaraMcpApprovalToolName(request.params)
       : undefined;
     if (
+      !agentGatewayToolsDisabled() &&
       isMcpToolCallApproval &&
       this.readString(request.params, "serverName") === SYNARA_MCP_SERVER_NAME &&
       context.gatewaySessionLease !== undefined &&

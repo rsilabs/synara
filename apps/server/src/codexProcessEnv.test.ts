@@ -1506,3 +1506,20 @@ describe("buildCodexProcessEnv account overlays", () => {
     }
   });
 });
+
+describe("buildCodexAppServerArgs strict MCP (literati)", () => {
+  it("turns off plugins, apps and browser/computer-use features only under SYNARA_STRICT_MCP", () => {
+    const home = mkdtempSync(path.join(os.tmpdir(), "codex-strict-args-"));
+    try {
+      expect(buildCodexAppServerArgs(home).join(" ")).not.toContain("features.");
+      process.env.SYNARA_STRICT_MCP = "1";
+      const args = buildCodexAppServerArgs(home).join(" ");
+      for (const feature of ["plugins", "apps", "browser_use", "in_app_browser", "computer_use"]) {
+        expect(args).toContain(`--config features.${feature}=false`);
+      }
+    } finally {
+      delete process.env.SYNARA_STRICT_MCP;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});

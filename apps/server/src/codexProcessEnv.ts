@@ -10,6 +10,8 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 
+import { strictMcpEnabled } from "./literatiFlags.ts";
+
 import { readActiveCodexProviderEnvKey } from "@synara/shared/codexConfig";
 import {
   readEnvironmentFromLoginShell,
@@ -203,8 +205,29 @@ export function buildCodexAppServerArgs(sourceHomePath: string): readonly string
     ...(codexSourceHomeUsesKeyringAuth(absoluteSourceHomePath)
       ? []
       : ["--config", 'cli_auth_credentials_store="file"']),
+    ...(strictMcpEnabled() ? CODEX_STRICT_MCP_APP_SERVER_ARGS : []),
   ];
 }
+
+/**
+ * literati: strict MCP turns off every Codex surface that brings in tools or
+ * servers Synara did not inject: plugins (their MCP servers, apps, skills and
+ * hooks), ChatGPT apps/connectors, and the browser / computer-use features.
+ * Process-scoped `--config` overrides apply to overlay and pass-through homes
+ * alike and never touch the user's config.toml. Codex ignores unknown feature
+ * keys, so older CLIs accept these too. The user's own `mcp_servers.*` are
+ * disabled per thread (see CodexAppServerManager.gatewayThreadConfig).
+ */
+export const CODEX_STRICT_MCP_APP_SERVER_ARGS: readonly string[] = [
+  "plugins",
+  "apps",
+  "remote_plugin",
+  "tool_suggest",
+  "browser_use",
+  "browser_use_external",
+  "in_app_browser",
+  "computer_use",
+].flatMap((feature) => ["--config", `features.${feature}=false`]);
 
 /**
  * literati: Codex keys keyring credentials by the canonical CODEX_HOME path,
@@ -3008,11 +3031,12 @@ export async function buildCodexProcessEnv(
   // default account skips the overlay and keeps the user's own home.
   const keyringPassThrough =
     !input.accountId && !input.shadowHomePath && codexSourceHomeUsesKeyringAuth(sourceHomePath);
-  const overlayHomePath = input.skipHomeOverlay || keyringPassThrough
-    ? undefined
-    : input.expectedSharedContinuationGeneration || input.allowLegacySharedContinuationMigration
-      ? await prepareCodexHomeOverlayFromPreparedContinuationSource(overlayPreparationInput)
-      : await prepareCodexHomeOverlay(overlayPreparationInput);
+  const overlayHomePath =
+    input.skipHomeOverlay || keyringPassThrough
+      ? undefined
+      : input.expectedSharedContinuationGeneration || input.allowLegacySharedContinuationMigration
+        ? await prepareCodexHomeOverlayFromPreparedContinuationSource(overlayPreparationInput)
+        : await prepareCodexHomeOverlay(overlayPreparationInput);
   const directAccountHomePath = input.shadowHomePath
     ? resolveBaseCodexHomePath(baseEnv, input.shadowHomePath)
     : input.homePath

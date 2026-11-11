@@ -324,6 +324,21 @@ describe("connector injection", () => {
     assert.notInclude(buildCodexMcpConfigToml(connection.url, "thread"), "connector");
   });
 
+  it("literati: drops only the synara server when gateway tools are disabled", () => {
+    process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
+    try {
+      assert.deepEqual(Object.keys(buildClaudeMcpServers(withConnectors)), ["supabase_connector"]);
+      assert.deepEqual(Object.keys(buildCodexMcpThreadConfig(withConnectors).mcp_servers), [
+        "supabase_connector",
+      ]);
+      const toml = buildCodexMcpConfigToml(connection.url, "thread");
+      assert.notInclude(toml, "[mcp_servers.synara]");
+      assert.include(toml, "[shell_environment_policy]");
+    } finally {
+      delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
+    }
+  });
+
   it("adds connectors using the transport advertised by ACP agents", () => {
     const http = buildAcpSynaraMcpServers({
       connection: withConnectors,

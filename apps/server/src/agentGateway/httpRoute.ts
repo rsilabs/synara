@@ -16,6 +16,7 @@ import { AGENT_GATEWAY_MCP_PATH } from "./Layers/AgentGatewayCredentials";
 import { AgentGateway } from "./Services/AgentGateway";
 import { AgentGatewayCredentials } from "./Services/AgentGatewayCredentials";
 import { extractBearerToken } from "./bearerToken.ts";
+import { agentGatewayToolsDisabled } from "../literatiFlags.ts";
 
 export const AGENT_GATEWAY_MCP_MAX_BODY_BYTES = 1024 * 1024;
 export const AGENT_GATEWAY_STDIO_BOOTSTRAP_PATH = `${AGENT_GATEWAY_MCP_PATH}/bootstrap`;
@@ -84,6 +85,18 @@ const postRouteLayer = HttpRouter.add(
   "POST",
   AGENT_GATEWAY_MCP_PATH,
   Effect.gen(function* () {
+    // literati: with gateway tools disabled the Synara tool endpoint is closed
+    // even to a valid bearer; connector proxies live on their own routes.
+    if (agentGatewayToolsDisabled()) {
+      return HttpServerResponse.jsonUnsafe(
+        {
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32601, message: "Synara gateway tools are disabled." },
+        },
+        { status: 404 },
+      );
+    }
     const request = yield* HttpServerRequest.HttpServerRequest;
     const gateway = yield* AgentGateway;
     const credentials = yield* AgentGatewayCredentials;
