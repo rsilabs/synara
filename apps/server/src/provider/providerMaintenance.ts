@@ -657,48 +657,16 @@ export function createProviderVersionAdvisory(input: {
   };
 }
 
-const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (packageName: string) {
-  return yield* Effect.tryPromise(async () => {
-    const response = await fetch(
-      `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`,
-      {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(LATEST_VERSION_TIMEOUT_MS),
-      },
-    );
-    if (!response.ok) {
-      return null;
-    }
-    const payload = (await response.json()) as { version?: unknown };
-    return nonEmptyString(payload.version);
-  }).pipe(Effect.catch(() => Effect.succeed(null)));
+// literati: Synara runs as an invisible sidecar, so it never contacts the npm
+// registry or Homebrew to advertise provider CLI updates.
+const fetchNpmLatestVersion = Effect.fn("fetchNpmLatestVersion")(function* (_packageName: string) {
+  return yield* Effect.succeed(null as string | null);
 });
 
 const fetchHomebrewLatestVersion = Effect.fn("fetchHomebrewLatestVersion")(function* (
-  source: ProviderLatestVersionSource,
+  _source: ProviderLatestVersionSource,
 ) {
-  if (source.kind !== "homebrew" || !source.homebrewKind) {
-    return null;
-  }
-  return yield* Effect.tryPromise(async () => {
-    const response = await fetch(
-      `https://formulae.brew.sh/api/${source.homebrewKind}/${encodeURIComponent(source.name)}.json`,
-      {
-        headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(LATEST_VERSION_TIMEOUT_MS),
-      },
-    );
-    if (!response.ok) {
-      return null;
-    }
-    const payload = (await response.json()) as {
-      version?: unknown;
-      versions?: { stable?: unknown };
-    };
-    return nonEmptyString(
-      source.homebrewKind === "cask" ? payload.version : payload.versions?.stable,
-    );
-  }).pipe(Effect.catch(() => Effect.succeed(null)));
+  return yield* Effect.succeed(null as string | null);
 });
 
 export const resolveLatestProviderVersion = Effect.fn("resolveLatestProviderVersion")(function* (
