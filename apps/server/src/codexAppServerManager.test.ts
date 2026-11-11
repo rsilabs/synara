@@ -7492,3 +7492,19 @@ describe("collab child routing after the parent turn ends", () => {
     expect(harness.context.collabReceiverParents.has("child_provider_0")).toBe(false);
   });
 });
+
+it("literati: Codex developer instructions never name Synara with a host app and no gateway", () => {
+  process.env.SYNARA_HOST_APP_NAME = "Literati";
+  process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
+  try {
+    for (const interactionMode of ["default", "plan"] as const) {
+      const mode = buildCodexCollaborationMode({ interactionMode, model: "gpt-5.3-codex" });
+      const instructions = mode?.settings.developer_instructions ?? "";
+      expect(instructions).toContain("Literati is the host and harness for this session.");
+      expect(instructions).not.toMatch(/synara/i);
+    }
+  } finally {
+    delete process.env.SYNARA_HOST_APP_NAME;
+    delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
+  }
+});

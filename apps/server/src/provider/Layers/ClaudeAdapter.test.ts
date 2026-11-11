@@ -1063,11 +1063,13 @@ describe("ClaudeAdapterLive", () => {
           Effect.sync(() => {
             process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
             process.env.SYNARA_STRICT_MCP = "1";
+            process.env.SYNARA_HOST_APP_NAME = "Literati";
           }),
           () =>
             Effect.sync(() => {
               delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
               delete process.env.SYNARA_STRICT_MCP;
+              delete process.env.SYNARA_HOST_APP_NAME;
             }),
         );
         const adapter = yield* ClaudeAdapter;
@@ -1097,7 +1099,8 @@ describe("ClaudeAdapterLive", () => {
             ? (systemPrompt.append ?? "")
             : "";
         assert.notInclude(append, "browser_*");
-        assert.include(append, "Synara MCP control is unavailable");
+        assert.include(append, "You are running inside Literati");
+        assert.notInclude(append, "Synara");
 
         yield* adapter.stopSession(THREAD_ID);
         yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20)));

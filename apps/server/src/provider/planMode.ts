@@ -8,8 +8,11 @@
 
 import type { ProviderInteractionMode } from "@synara/contracts";
 
+import { hostAppLabel } from "../literatiFlags.ts";
+
 export const PROVIDER_PLAN_MODE_PROMPT_PREFIX = [
-  "Synara plan mode is active.",
+  // literati: read once at load; the embedding host sets its name before start.
+  `${hostAppLabel()} plan mode is active.`,
   "Do not implement or mutate files in this turn. You may inspect or ask targeted questions as needed.",
   "When you are ready to present the final plan, wrap only the final plan markdown in these exact tags:",
   "<proposed_plan>",

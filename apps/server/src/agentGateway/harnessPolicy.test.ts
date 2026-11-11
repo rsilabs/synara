@@ -252,3 +252,22 @@ it("adds Computer guidance only for an explicitly enabled scoped session across 
     );
   }
 });
+
+describe("host app name (literati)", () => {
+  it("names the host instead of Synara and drops the no-gateway lines without a gateway", () => {
+    process.env.SYNARA_HOST_APP_NAME = "Literati";
+    process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS = "1";
+    try {
+      const policy = renderSynaraHarnessPolicy({ gatewayControlAvailable: false });
+      assert.include(policy, "Literati is the host and harness for this session.");
+      assert.notMatch(policy, /synara/i);
+    } finally {
+      delete process.env.SYNARA_HOST_APP_NAME;
+      delete process.env.SYNARA_DISABLE_AGENT_GATEWAY_TOOLS;
+    }
+    assert.include(
+      renderSynaraHarnessPolicy({ gatewayControlAvailable: false }),
+      "Synara is the host and harness for this session.",
+    );
+  });
+});

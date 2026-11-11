@@ -4,7 +4,7 @@ import { INLINE_VISUALS_BETA_FEATURE } from "@synara/shared/betaFeatures";
 import { isServerBetaFeatureEnabled } from "../betaFeatureGate.ts";
 
 import { computerToolInstructions } from "./computerGuidance.ts";
-import { agentGatewayToolsDisabled } from "../literatiFlags.ts";
+import { agentGatewayToolsDisabled, hostAppLabel, hostAppName } from "../literatiFlags.ts";
 
 import { AUTOMATION_AUTHORING_GUIDANCE } from "./automationAuthoringGuidance.ts";
 
@@ -66,16 +66,23 @@ export function renderSynaraHarnessPolicy(capabilities: SynaraHarnessCapabilitie
         'During an automation-dispatched turn, persist durable context with synara_update_automation_memory {"memory": "..."} before finishing; memory is full replacement, DB-backed, and capped at 32 KiB.',
         'Every automation-dispatched turn must finish by calling synara_report_automation_result. Use decision "silent" only for a successful run with nothing requiring user attention; otherwise use "notify" with a concise title and summary. Failures remain visible regardless of this decision or the automation notification policy. Never call this tool for a manual follow-up turn.',
       ]
-    : [
-        "Synara MCP control is unavailable in this provider session. Do not claim that Synara threads, projects, or automations were created or changed.",
-        "Provider-native subagent or Task tools do not create Synara threads. If the user explicitly requests Synara resource management, explain that this session cannot perform it.",
-      ];
+    : agentGatewayToolsDisabled()
+      ? // literati: no gateway at all; Synara threads/projects/automations do not exist here.
+        []
+      : [
+          "Synara MCP control is unavailable in this provider session. Do not claim that Synara threads, projects, or automations were created or changed.",
+          "Provider-native subagent or Task tools do not create Synara threads. If the user explicitly requests Synara resource management, explain that this session cannot perform it.",
+        ];
+  // literati: an embedding host's name replaces Synara in the host lines.
+  const host = hostAppLabel();
 
   return [
-    SYNARA_HARNESS_POLICY_MARKER,
-    "Synara is the host and harness for this session.",
+    hostAppName() !== undefined
+      ? `[${host} harness policy ${SYNARA_HARNESS_POLICY_VERSION}]`
+      : SYNARA_HARNESS_POLICY_MARKER,
+    `${host} is the host and harness for this session.`,
     "For known local files in user-facing Markdown, use readable labels and absolute file URLs, such as [config.ts](file:///absolute/path/config.ts). Relative links are only for the session working directory; otherwise use plain text and never invent a path.",
-    'Synara collapses progress and tools under "Worked for...". Final responses must restate every needed scope, plan, decision, result, caveat, instruction, or question. Never request approval using "this", "the above", or another referent available only in collapsed content.',
+    `${host} collapses progress and tools under "Worked for...". Final responses must restate every needed scope, plan, decision, result, caveat, instruction, or question. Never request approval using "this", "the above", or another referent available only in collapsed content.`,
     "When a structured user-input tool is available for a genuine decision, prefer it and include all decision context in its question or card.",
     ...controlPolicy,
     ...(capabilities.gatewayControlAvailable && capabilities.enableComputerControl === true
