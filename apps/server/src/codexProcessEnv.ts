@@ -198,9 +198,33 @@ export function buildCodexAppServerArgs(sourceHomePath: string): readonly string
     "app-server",
     "--config",
     `sqlite_home=${JSON.stringify(absoluteSourceHomePath)}`,
-    "--config",
-    'cli_auth_credentials_store="file"',
+    // literati: a keyring/auto user keeps their own credential store (forcing
+    // "file" would read an auth.json that does not exist and demand a login).
+    ...(codexSourceHomeUsesKeyringAuth(absoluteSourceHomePath)
+      ? []
+      : ["--config", 'cli_auth_credentials_store="file"']),
   ];
+}
+
+/**
+ * literati: Codex keys keyring credentials by the canonical CODEX_HOME path,
+ * so an overlay home can never see a keyring login. Users whose root config
+ * picks `keyring`/`auto` run Codex directly against their own home instead of
+ * being refused (upstream requires file-backed auth for managed homes).
+ */
+export function codexSourceHomeUsesKeyringAuth(sourceHomePath: string): boolean {
+  let config = "";
+  try {
+    config = readFileSync(path.join(sourceHomePath, "config.toml"), "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const mode = readEffectiveCodexAuthCredentialsStoreMode(config);
+    return mode === "keyring" || mode === "auto";
+  } catch {
+    return false;
+  }
 }
 
 export interface CodexOverlayEntryLinker {
@@ -346,6 +370,10 @@ function assertManagedCodexHomeUsesObservableAuth(input: {
 }): void {
   const mode = readEffectiveCodexAuthCredentialsStoreMode(input.sourceConfig);
   if (mode !== "keyring" && mode !== "auto") return;
+  // literati: the default account runs directly on the user's home (no
+  // overlay), so their own credential store is honoured. Only dedicated
+  // Synara-managed account homes still need file-backed auth.
+  if (!input.accountId?.trim()) return;
   const accountLabel = input.accountId?.trim() || "default";
   throw new Error(
     `Codex account '${accountLabel}' uses cli_auth_credentials_store = "${mode}". Synara-managed Codex homes require file-backed Codex auth so account changes can invalidate long-lived app-server sessions; set the root cli_auth_credentials_store = "file" before starting this account.`,
@@ -2976,7 +3004,11 @@ export async function buildCodexProcessEnv(
       ? { allowLegacySharedContinuationMigration: true }
       : {}),
   };
-  const overlayHomePath = input.skipHomeOverlay
+  // literati: keyring/auto auth is keyed by the CODEX_HOME path, so the
+  // default account skips the overlay and keeps the user's own home.
+  const keyringPassThrough =
+    !input.accountId && !input.shadowHomePath && codexSourceHomeUsesKeyringAuth(sourceHomePath);
+  const overlayHomePath = input.skipHomeOverlay || keyringPassThrough
     ? undefined
     : input.expectedSharedContinuationGeneration || input.allowLegacySharedContinuationMigration
       ? await prepareCodexHomeOverlayFromPreparedContinuationSource(overlayPreparationInput)
