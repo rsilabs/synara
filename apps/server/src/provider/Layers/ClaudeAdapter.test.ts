@@ -2319,8 +2319,97 @@ describe("ClaudeAdapterLive", () => {
           type: "text",
           text: [
             "<attached_files>",
-            "The user attached the following file(s), saved on disk. Read/extract them with your tools as needed; do not assume their contents.",
+            "The user attached the following file(s), saved on disk. Open each one with your Read tool at the exact absolute path shown (not a shell command); do not assume their contents.",
             `- \"diagram.svg\" - image/svg+xml - 11 B - ${attachmentPath}`,
+            "</attached_files>",
+          ].join("\n"),
+        },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("sends PDFs as document blocks and small text files inline (literati)", () => {
+    const baseDir = mkdtempSync(path.join(os.tmpdir(), "claude-native-attachments-"));
+    const harness = makeHarness({ cwd: "/tmp/project-claude-native-attachments", baseDir });
+    return Effect.gen(function* () {
+      yield* Effect.addFinalizer(() =>
+        Effect.sync(() => rmSync(baseDir, { recursive: true, force: true })),
+      );
+      const adapter = yield* ClaudeAdapter;
+      const { attachmentsDir } = yield* ServerConfig;
+      const pdf = {
+        type: "file" as const,
+        id: "thread-claude-pdf-12345678-1234-1234-1234-123456789abc",
+        name: "paper.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 8,
+      };
+      const tex = {
+        type: "file" as const,
+        id: "thread-claude-tex-12345678-1234-1234-1234-123456789abc",
+        name: "main.tex",
+        mimeType: "application/octet-stream",
+        sizeBytes: 16,
+      };
+      const binary = {
+        type: "file" as const,
+        id: "thread-claude-bin-12345678-1234-1234-1234-123456789abc",
+        name: "data.txt",
+        mimeType: "text/plain",
+        sizeBytes: 3,
+      };
+      const write = (attachment: typeof pdf, content: string | Uint8Array) => {
+        const target = path.join(attachmentsDir, attachmentRelativePath(attachment));
+        mkdirSync(path.dirname(target), { recursive: true });
+        writeFileSync(target, content);
+        return target;
+      };
+      write(pdf, "%PDF-1.4");
+      write(tex, "\\section{Intro}");
+      const binaryPath = write(binary, new Uint8Array([0xff, 0x00, 0x01]));
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: "claudeAgent",
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "Read these",
+        attachments: [pdf, tex, binary],
+      });
+
+      const promptMessage = yield* Effect.promise(() =>
+        readFirstPromptMessage(harness.getLastCreateQueryInput()),
+      );
+      assert.deepEqual(promptMessage?.message.content, [
+        { type: "text", text: "Read these" },
+        {
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: Buffer.from("%PDF-1.4").toString("base64"),
+          },
+          title: "paper.pdf",
+        },
+        {
+          type: "text",
+          text: [
+            '<attached_file name="main.tex" type="application/octet-stream">',
+            "\\section{Intro}",
+            "</attached_file>",
+          ].join("\n"),
+        },
+        {
+          type: "text",
+          text: [
+            "<attached_files>",
+            "The user attached the following file(s), saved on disk. Open each one with your Read tool at the exact absolute path shown (not a shell command); do not assume their contents.",
+            `- \"data.txt\" - text/plain - 3 B - ${binaryPath}`,
             "</attached_files>",
           ].join("\n"),
         },

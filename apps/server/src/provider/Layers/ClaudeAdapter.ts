@@ -124,6 +124,13 @@ import {
 import { buildClaudeMcpServers } from "../../agentGateway/mcpInjection.ts";
 import { agentGatewayToolsDisabled, strictMcpEnabled } from "../../literatiFlags.ts";
 import {
+  CLAUDE_NATIVE_PDF_MAX_BYTES,
+  decodeInlineText,
+  inlineTextAttachmentBlock,
+  isInlineTextAttachmentCandidate,
+  isPdfAttachment,
+} from "../nativeFileAttachments.ts";
+import {
   type ClaudeMcpConfigFile,
   claudeMcpConfigDir,
   sweepClaudeMcpConfigFiles,
@@ -1787,12 +1794,52 @@ function buildUserMessageEffect(
       );
     }
 
+    // literati: PDFs go to Claude as native document blocks and small text
+    // files inline, so the model never shells out to read Synara's storage.
+    const nativeFileAttachmentIds = new Set<string>();
+    for (const attachment of input.attachments ?? []) {
+      if (attachment.type !== "file") continue;
+      const asPdf =
+        isPdfAttachment(attachment) && attachment.sizeBytes <= CLAUDE_NATIVE_PDF_MAX_BYTES;
+      if (!asPdf && !isInlineTextAttachmentCandidate(attachment)) continue;
+      const attachmentPath = resolveProviderAttachmentPath({
+        attachmentsDir: dependencies.attachmentsDir,
+        attachment,
+      });
+      if (!attachmentPath) continue;
+      const bytes = yield* dependencies.fileSystem
+        .readFile(attachmentPath)
+        .pipe(Effect.option, Effect.map(Option.getOrUndefined));
+      if (!bytes) continue;
+      if (asPdf) {
+        if (bytes.byteLength > CLAUDE_NATIVE_PDF_MAX_BYTES) continue;
+        sdkContent.push({
+          type: "document",
+          source: {
+            type: "base64",
+            media_type: "application/pdf",
+            data: Buffer.from(bytes).toString("base64"),
+          },
+          title: attachment.name,
+        });
+        nativeFileAttachmentIds.add(attachment.id);
+        continue;
+      }
+      const text = decodeInlineText(bytes);
+      if (text === undefined) continue;
+      sdkContent.push({ type: "text", text: inlineTextAttachmentBlock(attachment, text) });
+      nativeFileAttachmentIds.add(attachment.id);
+    }
+
     const fileBlock = buildFileAttachmentsPromptBlock({
       attachments: input.attachments,
       attachmentsDir: dependencies.attachmentsDir,
       include: "all-files",
       includeImage: (attachment) =>
         !SUPPORTED_CLAUDE_IMAGE_MIME_TYPES.has(attachment.mimeType.toLowerCase()),
+      exclude: (attachment) => nativeFileAttachmentIds.has(attachment.id),
+      readInstruction:
+        "The user attached the following file(s), saved on disk. Open each one with your Read tool at the exact absolute path shown (not a shell command); do not assume their contents.",
     });
     if (fileBlock) {
       sdkContent.push({ type: "text", text: fileBlock });

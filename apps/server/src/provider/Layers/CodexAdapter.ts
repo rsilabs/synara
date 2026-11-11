@@ -6,6 +6,8 @@
  *
  * @module CodexAdapterLive
  */
+import { readFile } from "node:fs/promises";
+
 import {
   AsyncUserInputQuestions,
   type ChatAttachment,
@@ -92,6 +94,11 @@ import {
 } from "../usageLimit.ts";
 import { extractProposedPlanMarkdown } from "../planMode.ts";
 import { appendFileAttachmentsPromptBlock } from "../attachmentProjection.ts";
+import {
+  decodeInlineText,
+  inlineTextAttachmentBlock,
+  isInlineTextAttachmentCandidate,
+} from "../nativeFileAttachments.ts";
 import { synaraSkillsDir } from "../skillsCatalog.ts";
 import { makeBoundedCallbackIngress } from "../boundedCallbackIngress.ts";
 import { assignDerivedProviderRuntimeEventIds } from "../providerRuntimeEventIdentity.ts";
@@ -194,13 +201,44 @@ function composeCodexInputWithFileAttachments(input: {
   readonly input: string | undefined;
   readonly attachments: ReadonlyArray<ChatAttachment> | undefined;
   readonly attachmentsDir: string;
+  /** literati: small text files inlined by attachment id; they get no path line. */
+  readonly inlineTexts?: ReadonlyMap<string, string>;
 }): string | undefined {
+  const inlineTexts = input.inlineTexts ?? new Map<string, string>();
+  const inlineBlocks = (input.attachments ?? []).flatMap((attachment) => {
+    const text = attachment.type === "file" ? inlineTexts.get(attachment.id) : undefined;
+    return attachment.type === "file" && text !== undefined
+      ? [inlineTextAttachmentBlock(attachment, text)]
+      : [];
+  });
+  const text =
+    inlineBlocks.length > 0
+      ? [input.input, ...inlineBlocks].filter((part) => part && part.length > 0).join("\n\n")
+      : input.input;
   return appendFileAttachmentsPromptBlock({
-    text: input.input,
+    text,
     attachments: input.attachments,
     attachmentsDir: input.attachmentsDir,
     include: "all-files",
+    exclude: (attachment) => inlineTexts.has(attachment.id),
   });
+}
+
+/** literati: read small text attachments for inlining; anything unreadable keeps its path. */
+async function readCodexInlineTextAttachments(
+  attachments: ReadonlyArray<ChatAttachment> | undefined,
+  attachmentsDir: string,
+): Promise<Map<string, string>> {
+  const texts = new Map<string, string>();
+  for (const attachment of attachments ?? []) {
+    if (attachment.type !== "file" || !isInlineTextAttachmentCandidate(attachment)) continue;
+    const attachmentPath = resolveProviderAttachmentPath({ attachmentsDir, attachment });
+    if (!attachmentPath) continue;
+    const bytes = await readFile(attachmentPath).catch(() => undefined);
+    const text = bytes ? decodeInlineText(bytes) : undefined;
+    if (text !== undefined) texts.set(attachment.id, text);
+  }
+  return texts;
 }
 
 function codexModelSelectionOverrides(
@@ -2266,10 +2304,14 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           },
           { concurrency: 1 },
         );
+        const inlineTexts = yield* Effect.promise(() =>
+          readCodexInlineTextAttachments(input.attachments, serverConfig.attachmentsDir),
+        );
         const composedInput = composeCodexInputWithFileAttachments({
           input: input.input,
           attachments: input.attachments,
           attachmentsDir: serverConfig.attachmentsDir,
+          inlineTexts,
         });
 
         return {

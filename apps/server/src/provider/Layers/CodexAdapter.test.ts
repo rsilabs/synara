@@ -651,6 +651,9 @@ turnPreparationLayer("CodexAdapterLive turn input preparation", (it) => {
       const filePath = path.join(serverConfig.attachmentsDir, `${fileId}.txt`);
       yield* fileSystem.writeFile(imagePath, imageBytes);
       yield* fileSystem.writeFileString(filePath, "notes");
+      const pdfId = "codex-rich-input-pdf";
+      const pdfPath = path.join(serverConfig.attachmentsDir, `${pdfId}.pdf`);
+      yield* fileSystem.writeFileString(pdfPath, "%PDF-1.4");
 
       turnPreparationManager.sendTurnImpl.mockClear();
       turnPreparationManager.steerTurnImpl.mockClear();
@@ -671,6 +674,13 @@ turnPreparationLayer("CodexAdapterLive turn input preparation", (it) => {
             name: "notes.txt",
             mimeType: "text/plain",
             sizeBytes: 5,
+          },
+          {
+            type: "file" as const,
+            id: pdfId,
+            name: "paper.pdf",
+            mimeType: "application/pdf",
+            sizeBytes: 8,
           },
         ],
         skills: [{ name: "check-code", path: "/skills/check-code/SKILL.md" }],
@@ -699,9 +709,14 @@ turnPreparationLayer("CodexAdapterLive turn input preparation", (it) => {
         input: [
           "Inspect the attached context",
           "",
+          // literati: small text files are inlined; other files keep a path line.
+          '<attached_file name="notes.txt" type="text/plain">',
+          "notes",
+          "</attached_file>",
+          "",
           "<attached_files>",
           "The user attached the following file(s), saved on disk. Read/extract them with your tools as needed; do not assume their contents.",
-          `- \"notes.txt\" - text/plain - 5 B - ${filePath}`,
+          `- \"paper.pdf\" - application/pdf - 8 B - ${pdfPath}`,
           "</attached_files>",
         ].join("\n"),
         skills: [{ name: "check-code", path: "/skills/check-code/SKILL.md" }],

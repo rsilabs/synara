@@ -35,10 +35,17 @@ export function buildFileAttachmentsPromptBlock(input: {
   readonly attachmentsDir: string;
   readonly include: "all-files" | "non-pdf-files";
   readonly includeImage?: (attachment: ChatImageAttachment) => boolean;
+  /** literati: attachments already delivered natively (inline text, document blocks). */
+  readonly exclude?: (attachment: ChatAttachment) => boolean;
+  /** literati: replaces the default "read with your tools" sentence. */
+  readonly readInstruction?: string;
 }): string | null {
   const lines: string[] = [];
   for (const attachment of input.attachments ?? []) {
     if (!isProjectedFileAttachment(attachment, input.include, input.includeImage)) {
+      continue;
+    }
+    if (input.exclude?.(attachment)) {
       continue;
     }
     const attachmentPath = resolveProviderAttachmentPath({
@@ -60,7 +67,8 @@ export function buildFileAttachmentsPromptBlock(input: {
 
   return [
     "<attached_files>",
-    "The user attached the following file(s), saved on disk. Read/extract them with your tools as needed; do not assume their contents.",
+    input.readInstruction ??
+      "The user attached the following file(s), saved on disk. Read/extract them with your tools as needed; do not assume their contents.",
     ...lines,
     "</attached_files>",
   ].join("\n");
@@ -72,12 +80,14 @@ export function appendFileAttachmentsPromptBlock(input: {
   readonly attachmentsDir: string;
   readonly include: "all-files" | "non-pdf-files";
   readonly includeImage?: (attachment: ChatImageAttachment) => boolean;
+  readonly exclude?: (attachment: ChatAttachment) => boolean;
 }): string | undefined {
   const fileBlock = buildFileAttachmentsPromptBlock({
     attachments: input.attachments,
     attachmentsDir: input.attachmentsDir,
     include: input.include,
     ...(input.includeImage ? { includeImage: input.includeImage } : {}),
+    ...(input.exclude ? { exclude: input.exclude } : {}),
   });
   return fileBlock ? `${input.text ?? ""}${input.text ? "\n\n" : ""}${fileBlock}` : input.text;
 }
